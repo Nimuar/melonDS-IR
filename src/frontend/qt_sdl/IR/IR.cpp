@@ -21,11 +21,21 @@ namespace melonDS::Platform
 //---------------------TCP = 2
 QTcpServer *server = nullptr;
 QTcpSocket *sock = nullptr;
-void IR_OpenTCP(void * userdata){
-    int conn = 0;
-    if (!server){
 
+static void IR_CleanupTCPSocket(){
+    if (sock) {
+        sock->abort();
+        sock->deleteLater();
+        sock = nullptr;
+    }
+}
+
+void IR_OpenTCP(void * userdata){
+    if (!server){
         server = new QTcpServer();
+    }
+
+    if (!server->isListening()) {
         if (!server->listen(QHostAddress::Any, 8081)) {
             printf("Failed to start TCP server: %s\n", server->errorString().toUtf8().constData());
             return;
@@ -33,14 +43,29 @@ void IR_OpenTCP(void * userdata){
         printf("TCP server listening on port 8081\n");
     }
 
-    else return;
+    QCoreApplication::processEvents();
 
-    while(conn == 0){
+    if (sock && sock->state() != QAbstractSocket::ConnectedState) {
+        printf("Client disconnected, cleaning up socket\n");
+        IR_CleanupTCPSocket();
+    }
+
+    EmuInstance* inst = static_cast<EmuInstance*>(userdata);
+    while (!sock) {
+        if (QCoreApplication::closingDown()) {
+            return;
+        }
+        if (inst && inst->getLocalConfig().GetInt("IR.Mode") != 2) {
+            return;
+        }
         QCoreApplication::processEvents();
-        if (!sock && server->hasPendingConnections()) {
+        if (server->hasPendingConnections()) {
             sock = server->nextPendingConnection();
-            printf("Client connected\n");
-            conn = 1;
+            if (sock) {
+                sock->setSocketOption(QAbstractSocket::LowDelayOption, 1);
+                printf("Client connected\n");
+                break;
+            }
         }
         QThread::msleep(10); // avoid CPU spin
     }
@@ -52,11 +77,19 @@ u8 IR_TCP_SendPacket(char* data, int len, void * userdata){
 
     if (!sock || sock->state() != QAbstractSocket::ConnectedState){
         printf("No client connected to send IR data\n");
+        IR_CleanupTCPSocket();
         return 0;
     }
 
     qint64 written = sock->write(data, len);
     sock->flush();
+    QCoreApplication::processEvents();
+
+    if (written < 0 || sock->state() != QAbstractSocket::ConnectedState) {
+        printf("Client disconnected during send\n");
+        IR_CleanupTCPSocket();
+        return 0;
+    }
 
     printf("Sent %lld bytes to client\n", written);
     return 0;
@@ -66,13 +99,20 @@ u8 IR_TCP_SendPacket(char* data, int len, void * userdata){
 u8 IR_TCP_RecievePacket(char* data, int len, void * userdata){
     IR_OpenTCP(userdata);
     QCoreApplication::processEvents();
-    if (!sock || sock->bytesAvailable() <= 0){
+    if (!sock || sock->state() != QAbstractSocket::ConnectedState){
+        IR_CleanupTCPSocket();
+        return 0;
+    }
+    if (sock->bytesAvailable() <= 0){
         return 0;
     }
     qint64 bytesRead = sock->read(data, len); //len is maxLen
 
     if (bytesRead > 0){
-        return static_cast<int>(bytesRead);
+        return static_cast<u8>(bytesRead);
+    }
+    if (bytesRead < 0 || sock->state() != QAbstractSocket::ConnectedState){
+        IR_CleanupTCPSocket();
     }
     return 0;
 }
