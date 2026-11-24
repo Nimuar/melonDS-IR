@@ -1,6 +1,8 @@
 
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QHostAddress>
+#include <QCoreApplication>
 #include <QtSerialPort/QSerialPort>
 #include <QDateTime>
 
@@ -11,6 +13,7 @@
 #include "EmuInstance.h"
 
 #include "PokeEscalator.h"
+#include "IRMDNS.h"
 //Improvements to be made.
 
 namespace melonDS::Platform
@@ -30,7 +33,26 @@ static void IR_CleanupTCPSocket(){
     }
 }
 
+static void IR_CloseTCP(){
+    IR_CleanupTCPSocket();
+    IR_StopMDNS();
+    if (server) {
+        server->close();
+        server->deleteLater();
+        server = nullptr;
+    }
+}
+
 void IR_OpenTCP(void * userdata){
+    if (QCoreApplication::closingDown()) {
+        return;
+    }
+
+    EmuInstance* inst = static_cast<EmuInstance*>(userdata);
+    if (inst && inst->getLocalConfig().GetInt("IR.Mode") != 2) {
+        return;
+    }
+
     if (!server){
         server = new QTcpServer();
     }
@@ -41,33 +63,31 @@ void IR_OpenTCP(void * userdata){
             return;
         }
         printf("TCP server listening on port 8081\n");
+        IR_StartMDNS(8081);
     }
 
     QCoreApplication::processEvents();
+    IR_PollMDNS();
 
     if (sock && sock->state() != QAbstractSocket::ConnectedState) {
         printf("Client disconnected, cleaning up socket\n");
         IR_CleanupTCPSocket();
     }
 
-    EmuInstance* inst = static_cast<EmuInstance*>(userdata);
-    while (!sock) {
-        if (QCoreApplication::closingDown()) {
-            return;
-        }
-        if (inst && inst->getLocalConfig().GetInt("IR.Mode") != 2) {
-            return;
-        }
-        QCoreApplication::processEvents();
-        if (server->hasPendingConnections()) {
-            sock = server->nextPendingConnection();
+    while (server->hasPendingConnections()) {
+        QTcpSocket* nextSock = server->nextPendingConnection();
+        if (nextSock) {
             if (sock) {
-                sock->setSocketOption(QAbstractSocket::LowDelayOption, 1);
-                printf("Client connected\n");
-                break;
+                printf("New TCP client connected, replacing existing socket\n");
+                IR_CleanupTCPSocket();
             }
+            sock = nextSock;
+            sock->setSocketOption(QAbstractSocket::LowDelayOption, 1);
+            sock->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
+            printf("Client connected from %s:%u\n",
+                   sock->peerAddress().toString().toUtf8().constData(),
+                   sock->peerPort());
         }
-        QThread::msleep(10); // avoid CPU spin
     }
 }
 
@@ -438,6 +458,8 @@ u8 IR_SendPacket(char* data, int len, void * userdata){
     if (IRMode != lastIRMode) {
         if (lastIRMode == 1) {
             IR_CloseSerialPort();
+        } else if (lastIRMode == 2) {
+            IR_CloseTCP();
         }
     }
     lastIRMode = IRMode;
@@ -460,6 +482,8 @@ u8 IR_RecievePacket(char* data, int len, void * userdata){
     if (IRMode != lastIRMode) {
         if (lastIRMode == 1) {
             IR_CloseSerialPort();
+        } else if (lastIRMode == 2) {
+            IR_CloseTCP();
         }
     }
     lastIRMode = IRMode;

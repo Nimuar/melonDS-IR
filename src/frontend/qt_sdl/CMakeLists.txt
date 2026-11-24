@@ -32,6 +32,7 @@ set(SOURCES_QT_SDL
 
     IR/PokeEscalator.cpp
     IR/IR.cpp
+    IR/IRMDNS.cpp
     InterfaceSettingsDialog.cpp
     ROMInfoDialog.cpp
     RAMInfoDialog.cpp
